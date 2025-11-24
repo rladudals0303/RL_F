@@ -8,6 +8,8 @@ import torch.optim as optim
 from torch.distributions import Categorical, Normal
 import numpy as np
 import gymnasium as gym
+import kymnasium as kym
+from typing import Any, Dict, List
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
@@ -238,12 +240,12 @@ def hierarchical_act(stone_agents, master_agent, stone_states, full_state):
 
 class PPOBuffer:
     def __init__(self):
-        self.obs = []
-        self.actions = []
-        self.logps = []
-        self.rewards = []
-        self.values = []
-        self.dones = []
+        self.obs: List[torch.Tensor] = []
+        self.actions: List[Dict[str, float]] = []
+        self.logps: List[Any] = []
+        self.rewards: List[float] = []
+        self.values: List[float] = []
+        self.dones: List[bool] = []
 
     def store(self, *args):
         self.obs.append(args[0])
@@ -264,13 +266,18 @@ class PPOBuffer:
 def ppo_update(master_agent, stone_agents, critic, buffer, optimizer):
     # TODO: implement full PPO update logic
     # This skeleton defines the loop, but not full math.
-    advantages = compute_advantages_stub(buffer)
+    if not buffer.rewards:
+        return
+
+    _ = compute_advantages_stub(buffer)
     # TODO: compute losses for:
     # - master policy
     # - critic
     # - stone stage1 (risk prediction)
     # - stone stage2 (proposal quality)
-    pass
+    # For now, we simply clear gradients to keep the training loop functional.
+    optimizer.zero_grad()
+    optimizer.step()
 
 
 ###############################################################
@@ -279,44 +286,66 @@ def ppo_update(master_agent, stone_agents, critic, buffer, optimizer):
 
 def compute_advantages_stub(buffer):
     # TODO: replace with GAE
-    return torch.zeros(len(buffer.rewards))
+    rewards = buffer.rewards
+    dones = buffer.dones
+    returns = []
+    gamma = 0.99
+    ret = 0.0
+    for r, d in zip(reversed(rewards), reversed(dones)):
+        if d:
+            ret = 0.0
+        ret = r + gamma * ret
+        returns.insert(0, ret)
+    return torch.tensor(returns, dtype=torch.float32)
 
 
 ###############################################################
 # 12. Agent Setup
 ###############################################################
 
-class myBlackAgent(kym.Agent):
-    def act(self, observation: Any, info: Dict):
+class _BaseAgent(kym.Agent):
+    def __init__(self, turn: int):
+        self.turn = turn
+
+    def _choose_index(self, observation: Dict) -> int:
+        stones = observation["black"] if self.turn == 0 else observation["white"]
+        for idx, (_, _, alive) in enumerate(stones):
+            if alive:
+                return idx
+        return 0
+
+    def _default_action(self, observation: Dict) -> Dict[str, float]:
         return {
-            "turn": 0,
-            "index": ,
-            "power": ,
-            "angle": ,    
-            }
-    
+            "turn": self.turn,
+            "index": self._choose_index(observation),
+            "power": 1.0,
+            "angle": 0.0,
+        }
+
     @classmethod
-    def load(cls, path: str) -> 'kym.Agent':
-        pass
+    def load(cls, path: str) -> "kym.Agent":
+        # Placeholder load for competition API compatibility
+        turn = torch.load(path)[0] if path else 0
+        return cls(turn)
 
     def save(self, path: str):
-        pass
+        torch.save((self.turn,), path)
 
-class myWhiteAgent(kym.Agent):
+
+class myBlackAgent(_BaseAgent):
+    def __init__(self, turn: int = 0):
+        super().__init__(turn=turn)
+
     def act(self, observation: Any, info: Dict):
-        return {
-            "turn": 1,
-            "index": ,
-            "power": ,
-            "angle": ,    
-            }
-    
-    @classmethod
-    def load(cls, path: str) -> 'kym.Agent':
-        pass
+        return self._default_action(observation)
 
-    def save(self, path: str):
-        pass
+
+class myWhiteAgent(_BaseAgent):
+    def __init__(self, turn: int = 1):
+        super().__init__(turn=turn)
+
+    def act(self, observation: Any, info: Dict):
+        return self._default_action(observation)
 
 
 ###############################################################
@@ -358,7 +387,8 @@ def train():
                 full_state
             )
 
-            next_obs, env_r, done, trunc, info = env.step(action)
+            next_obs, env_r, terminated, truncated, info = env.step(action)
+            done = terminated or truncated
 
             # Compute GT for Stage1
             gt_risks = [compute_risk(s) for s in stone_states]
